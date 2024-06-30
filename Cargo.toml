@@ -1,0 +1,9 @@
+[package]
+name = "secp256k1"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hex = "0.4"
+num-bigint = "0.4" 
+num-traits = "0.2" 
