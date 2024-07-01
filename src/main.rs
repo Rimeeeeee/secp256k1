@@ -2,7 +2,7 @@
 extern crate num_bigint;
 extern crate num_traits;
 extern crate num_integer;
-use num_integer::Integer;
+use num_integer::{sqrt, Integer};
 
 use num_bigint::{BigInt, BigUint, ToBigInt};
 use num_traits::{pow, Num, One, Zero};
@@ -266,7 +266,43 @@ pub fn verify(a:&EccPt)->bool{
         _=>false 
     }
    
+}//computing qa,qb dhke
+fn deffie_hellman_computation_q(g:&EccPt,z:BigUint)->(BigUint,BigUint){
+    
+    let n =  BigUint::from_str_radix(N, 16).unwrap();
+   
+    let w = scalar_mul(z, g);
+
+    match w {
+        EccPt::Infinity => panic!("Not possible to compute"),
+        EccPt::Point { x: a, y: b }=>return (a,b),
+        _ => panic!("Unhandled case in ECC point computation"),
+    }
+
 }
+
+//fn that checks if the final resulted computed is equal
+pub fn deffie_hellman_verification(qa: &(BigUint,BigUint), qb: &(BigUint,BigUint), z: BigUint, z1: BigUint) -> bool {
+    let n = BigUint::from_str_radix(N, 16).unwrap();
+    let (a, b) = qa;
+    let (g, h) = qb;
+
+   
+    let p1 = EccPt::Point {
+        x: a.clone(),
+        y: b.clone(),
+    };
+    let p2 = EccPt::Point {
+        x: g.clone(),
+        y: h.clone(),
+    };
+
+    let scalar_pdt = scalar_mul(z, &p2);
+    let scalar_pdt1 = scalar_mul(z1, &p1);
+
+    scalar_pdt == scalar_pdt1
+}
+
 
 fn main() {
     // Example of creating a finite point
@@ -322,6 +358,25 @@ fn main() {
     println!("Signature: {:?}", signature);
     let verification_result=signature_verify(signature,x, priv_key.public_point);
     println!("Verification result:{}",verification_result);
+    let secret_key = "my_secret";//provide during computation
+    let secret_key1="other_secret";
+    let mut hasher = Sha256::new();
+    hasher.update(secret_key.as_bytes());
+    let result = hasher.finalize();
+    let z = BigUint::from_bytes_be(&result);
+    let z_clone=z.clone();
+    println!("z:{}",z);
+    let mut hasher1 = Sha256::new();
+    hasher1.update(secret_key1.as_bytes());
+    let result1 = hasher1.finalize();
+    let z1 = BigUint::from_bytes_be(&result1);
+    println!("z1:{}",z1);
+   let z1_clone=z1.clone();
+   let qa=deffie_hellman_computation_q(&point3,z);//computation of qa for Alice
+   let qb=deffie_hellman_computation_q(&point3, z1);//computation of qb for Bob
+   let res=deffie_hellman_verification(&qa, &qb, z_clone,z1_clone);//checking equality of both dhke
+   println!("{}",res);//should return true
+   
 }
 #[cfg(test)]
 mod tests{
