@@ -1,16 +1,28 @@
+
 extern crate num_bigint;
 extern crate num_traits;
+extern crate num_integer;
+use num_integer::Integer;
+
 use num_bigint::{BigInt, BigUint, ToBigInt};
-use num_traits::{Num, One, Zero};
+use num_traits::{pow, Num, One, Zero};
 use std::mem::swap;
+extern crate hmac;
+extern crate sha2;
 
 
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+
+use std::ops::{Add, Mul, Sub};
+
+type HmacSha256 = Hmac<Sha256>;
 const P: &str = "115792089237316195423570985008687907853269984665640564039457584007908834671663";//2^256-2^32-977
-//eqn y^2=x^3+7
+const N: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141";
 
 // Define the Ecc_pt enum to represent finite points and the point at infinity
 #[derive(Debug, PartialEq, Clone)]
-enum EccPt {
+pub enum EccPt {
     Infinity,
     Point {
         x: BigUint,
@@ -18,8 +30,133 @@ enum EccPt {
     },
 }
 
+#[derive(Debug)]
+struct Signature {
+    r: BigUint,
+    s: BigUint,
+}
+impl Signature {
+    fn new(r: BigUint, s: BigUint) -> Self {
+        Signature { r, s }
+    }
+}
+struct PrivateKey {
+    secret: BigUint,
+    public_point: EccPt,
+}
+
+impl PrivateKey {
+    fn new(secret: BigUint) -> Self {
+        let public_point = Self::generate_public_point(&secret);
+        PrivateKey { secret, public_point }
+    }
+
+    fn generate_public_point(secret: &BigUint) -> EccPt {
+        let gx = BigUint::from_str_radix("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798", 16).unwrap();
+        let gy = BigUint::from_str_radix("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8", 16).unwrap();
+        let g = EccPt::new(gx, gy);
+        scalar_mul(secret.clone(), &g)
+    }
+
+    fn deterministic_k(&self, z: &BigUint) -> BigUint {
+        let n = BigUint::from_str_radix(N, 16).unwrap();
+        let mut k = vec![0u8; 32];
+        let mut v = vec![1u8; 32];
+
+        let mut z = z.clone();
+        if z > n {
+            z = z.sub(&n);
+        }
+        let z_bytes = z.to_bytes_be();
+        let secret_bytes = self.secret.to_bytes_be();
+
+        let mut hmac = HmacSha256::new_from_slice(&k).unwrap();
+        hmac.update(&v);
+        hmac.update(&[0x00]);
+        hmac.update(&secret_bytes);
+        hmac.update(&z_bytes);
+        k = hmac.finalize().into_bytes().to_vec();
+
+        let mut hmac = HmacSha256::new_from_slice(&k).unwrap();
+        hmac.update(&v);
+        v = hmac.finalize().into_bytes().to_vec();
+
+        let mut hmac = HmacSha256::new_from_slice(&k).unwrap();
+        hmac.update(&v);
+        hmac.update(&[0x01]);
+        hmac.update(&secret_bytes);
+        hmac.update(&z_bytes);
+        k = hmac.finalize().into_bytes().to_vec();
+
+        let mut hmac = HmacSha256::new_from_slice(&k).unwrap();
+        hmac.update(&v);
+        v = hmac.finalize().into_bytes().to_vec();
+
+        loop {
+            let mut hmac = HmacSha256::new_from_slice(&k).unwrap();
+            hmac.update(&v);
+            v = hmac.finalize().into_bytes().to_vec();
+            let candidate = BigUint::from_bytes_be(&v);
+            if candidate >= BigUint::one() && candidate < n {
+                return candidate;
+            }
+
+            let mut hmac = HmacSha256::new_from_slice(&k).unwrap();
+            hmac.update(&v);
+            hmac.update(&[0x00]);
+            k = hmac.finalize().into_bytes().to_vec();
+
+            let mut hmac = HmacSha256::new_from_slice(&k).unwrap();
+            hmac.update(&v);
+            v = hmac.finalize().into_bytes().to_vec();
+        }
+    }
+    //signing encrypts the message
+    fn sign(&self, z: BigUint) -> Signature {
+        let k = self.deterministic_k(&z);
+        let r = match scalar_mul(k.clone(), &EccPt::new(
+            BigUint::from_str_radix("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798", 16).unwrap(),
+            BigUint::from_str_radix("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8", 16).unwrap()
+        )) {
+            EccPt::Point { x, .. } => x,
+            _ => panic!("Invalid point multiplication"),
+        };
+        let r_clone = r.clone();
+        let n = BigUint::from_str_radix(N, 16).unwrap();
+        let k_inv = mod_inverse(k, n.clone());
+        let s = ((z + &r * &self.secret) * k_inv) % &n;
+
+        let s = if s > n.clone() >> 1 {
+            n - s
+        } else {
+            s
+        };
+
+        Signature::new(r_clone, s)
+    }
+}//decryption and validation
+fn signature_verify(sig: Signature, z: BigUint, pubk: EccPt) -> bool {
+    let n = BigUint::from_str_radix(N, 16).unwrap();
+    let s_inv = mod_inverse(sig.s.clone(), n.clone());
+    let u = (&z * &s_inv) % &n;
+    let v = (&sig.r * &s_inv) % &n;
+
+    let gx = BigUint::from_str_radix("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798", 16).unwrap();
+    let gy = BigUint::from_str_radix("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8", 16).unwrap();
+    let g = EccPt::new(gx, gy);
+    let w = scalar_mul(u, &g);
+    let x = scalar_mul(v, &pubk);
+    let total = chord_sum(&w, &x);
+
+    match total {
+        EccPt::Point { x: q, .. } => q == sig.r,
+        EccPt::Infinity => false,
+    }
+}
+    //eqn y^2=x^3+7
+
 // Implement the modular inverse function using the Extended Euclidean Algorithm
-fn mod_inverse(a: BigUint, m: BigUint) -> BigUint {
+pub fn mod_inverse(a: BigUint, m: BigUint) -> BigUint {
     let (mut t, mut new_t) = (BigInt::zero(), BigInt::from(1));
     let (mut r, mut new_r) = (m.to_bigint().unwrap(), a.to_bigint().unwrap());
 
@@ -45,9 +182,9 @@ fn mod_inverse(a: BigUint, m: BigUint) -> BigUint {
 }
 
 // Implement methods for the EccPt enum
-impl EccPt {
+ impl EccPt {
     // Constructor function to create a finite point
-    fn new(x: BigUint, y: BigUint) -> Self {
+   pub fn new(x: BigUint, y: BigUint) -> Self {
         EccPt::Point { x, y }
     }
 
@@ -58,7 +195,7 @@ impl EccPt {
 }
 
 // Elliptic curve point addition using tangent-slope formula
-fn tangent_sum(a: &EccPt, b: &EccPt) -> EccPt {
+pub fn tangent_sum(a: &EccPt, b: &EccPt) -> EccPt {
     match (a, b) {
         (EccPt::Point { x: ax, y: ay }, EccPt::Point { x: bx, y: by }) if ax == bx && ay == by => {
             if ay.is_zero() {
@@ -79,7 +216,7 @@ fn tangent_sum(a: &EccPt, b: &EccPt) -> EccPt {
 }
 
 // Elliptic curve point addition using chord-slope formula
-fn chord_sum(a: &EccPt, b: &EccPt) -> EccPt {
+pub fn chord_sum(a: &EccPt, b: &EccPt) -> EccPt {
     match (a, b) {
         (EccPt::Infinity, point) | (point, EccPt::Infinity) => point.clone(),
         (EccPt::Point { x: ax, y: ay }, EccPt::Point { x: bx, y: by }) if ax == bx && ay == by => {
@@ -105,7 +242,7 @@ fn chord_sum(a: &EccPt, b: &EccPt) -> EccPt {
 }
 
 // Scalar multiplication over elliptic curve
-fn scalar_mul(k: BigUint, point: &EccPt) -> EccPt {
+pub fn scalar_mul(k: BigUint, point: &EccPt) -> EccPt {
     let mut n = k;
     let mut q = EccPt::Infinity;
     let mut p = point.clone();
@@ -122,7 +259,7 @@ fn scalar_mul(k: BigUint, point: &EccPt) -> EccPt {
     q
 }
 //verification whether a given set of pt exist on exist on elliptic curve
-fn verify(a:&EccPt)->bool{
+pub fn verify(a:&EccPt)->bool{
     match a{
         EccPt::Infinity=>true,
        ( EccPt::Point { x:m, y:n})if ((n*n)%BigUint::from_str_radix(P, 10).unwrap())==((m*m*m)+BigUint::from(7u8))%BigUint::from_str_radix(P, 10).unwrap() =>true,
@@ -130,6 +267,7 @@ fn verify(a:&EccPt)->bool{
     }
    
 }
+
 fn main() {
     // Example of creating a finite point
     let gx = "4";
@@ -171,6 +309,19 @@ fn main() {
     println!("Verify:{}",verify_result);
     let verify_result1=verify(&point1);
     println!("Verify:{}",verify_result1);
+    let secret = BigUint::from_str_radix("65437", 10).unwrap(); // Replace with actual secret
+    println!("{}",secret);
+    
+    let priv_key = PrivateKey::new(secret);
+   
+    let message = "Hello, world!";
+    let z = BigUint::from_bytes_be(Sha256::digest(message.as_bytes()).as_slice());
+    let x=z.clone();
+    let signature = priv_key.sign(z);
+    
+    println!("Signature: {:?}", signature);
+    let verification_result=signature_verify(signature,x, priv_key.public_point);
+    println!("Verification result:{}",verification_result);
 }
 #[cfg(test)]
 mod tests{
@@ -234,5 +385,16 @@ mod tests{
     let verify_result1=verify(&point);
     assert_eq!(true,verify_result1);
     }
-    
+    #[test]
+    fn signature_verify_test(){
+        let secret = BigUint::from_str_radix("00123589034436858", 10).unwrap();//secret
+        let priv_key = PrivateKey::new(secret);
+        //priv_key.public_point,g,p,signature are public parameters
+        let message = "Hello, world!";//msg to be shared
+        let z = BigUint::from_bytes_be(Sha256::digest(message.as_bytes()).as_slice());
+        let x=z.clone();
+        let signature = priv_key.sign(z);
+        assert_eq!(true,signature_verify(signature,x, priv_key.public_point));
+    }
 }
+
